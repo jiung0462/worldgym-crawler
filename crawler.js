@@ -9,14 +9,18 @@ const axios = require('axios');
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
   });
   const page = await context.newPage();
-
-  // 設定操作超時上限，避免無限等待
   page.setDefaultTimeout(10000);
 
-  // 進入台南 BodyCombat 查詢頁
-  const targetUrl = 'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&class_uid=AB0060001#query_result';
-  console.log('🌐 正在開啟查詢頁面...');
-  await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  // ----------------------------------------------------
+  // 在這裡放入您想「聯集合併」的多個網址清單
+  // ----------------------------------------------------
+  const targetUrls = [
+    // 網址 1：例如台南市 BodyCombat
+    'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&class_uid=AB0060001#query_result',
+    
+    // 網址 2：請替換為您的第二個查詢網址 (例如加入其他課程或縣市)
+    'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&teacher_emp_no=6616#query_result'
+  ];
 
   // 抽取單週課表的共用函式
   const extractCurrentWeek = async () => {
@@ -24,7 +28,6 @@ const axios = require('axios');
       const cards = Array.from(document.querySelectorAll('#schedule_area .class_list'));
       if (!cards.length) return { courses: [], weekRange: "" };
 
-      // 支援常規格式 (9月 7-13, 2026) 與跨月格式 (9月 28-10月 4, 2026)
       const text = document.body.innerText;
       const match = text.match(/(\d{1,2})月\s*(\d{1,2})\s*[-~至]\s*(?:(\d{1,2})月\s*)?(\d{1,2}),?\s*(\d{4})/);
       
@@ -69,6 +72,10 @@ const axios = require('axios');
         const storeEl = card.querySelector('.class_store');
         const branch = storeEl ? storeEl.innerText.replace('台南', '').replace('店', '').trim() : "";
 
+        // 嘗試抓取課程名稱（若卡片上有標示），避免不同課程在同教室同時間被視為重複
+        const titleEl = card.querySelector('.class_title') || card.querySelector('h4') || card.querySelector('.classname');
+        const className = titleEl ? titleEl.innerText.trim() : "";
+
         const teacherEl = card.querySelector('.teacher');
         let teacher = teacherEl ? teacherEl.innerText.trim() : "";
         if (card.innerText.includes('代課') && !teacher.includes('代課')) {
@@ -76,7 +83,7 @@ const axios = require('axios');
         }
 
         if (start && branch) {
-          list.push({ date: dateStr, start, end, branch, teacher });
+          list.push({ date: dateStr, start, end, branch, teacher, className });
         }
       });
 
@@ -84,79 +91,79 @@ const axios = require('axios');
     });
   };
 
-  // 等待課表區域載入
-  await page.waitForSelector('#schedule_area', { timeout: 15000 }).catch(() => {});
-  await page.waitForTimeout(2000);
-
-  // ----------------------------------------------------
-  // 步驟一：回溯至最早的歷史週次
-  // ----------------------------------------------------
-  console.log('⏪ 正在回溯至最早的上一週/歷史週...');
-  for (let step = 0; step < 4; step++) {
-    const prevBtn = await page.$('button.slick-prev');
-    if (!prevBtn) break;
-
-    const isPrevDisabled = await page.evaluate(el => el.classList.contains('slick-disabled') || el.disabled, prevBtn);
-    if (isPrevDisabled) {
-      console.log('📌 已抵達最早週次 (無法再上一週)。');
-      break;
-    }
-
-    try {
-      console.log('👈 點擊前往上一週...');
-      await prevBtn.click({ timeout: 3000 });
-      await page.waitForTimeout(1500);
-    } catch (e) {
-      console.log('⚠️ 上一週點擊未響應，停止回溯。');
-      break;
-    }
-  }
-
-  // ----------------------------------------------------
-  // 步驟二：由最早週一路往後抓取所有開放週次
-  // ----------------------------------------------------
   const allCourses = [];
-  const visitedWeeks = new Set();
 
-  for (let week = 1; week <= 10; week++) {
-    await page.waitForTimeout(1200);
-    const weekData = await extractCurrentWeek();
-
-    console.log(`🔎 抓取週次 [${weekData.weekRange}]，課程數 ${weekData.courses.length} 筆`);
-
-    if (weekData.weekRange && !visitedWeeks.has(weekData.weekRange)) {
-      visitedWeeks.add(weekData.weekRange);
-      allCourses.push(...weekData.courses);
-    }
-
-    // 檢查「下一週」按鈕
-    const nextBtn = await page.$('button.slick-next');
-    if (!nextBtn) break;
-
-    const isNextDisabled = await page.evaluate(el => el.classList.contains('slick-disabled') || el.disabled, nextBtn);
-    if (isNextDisabled) {
-      console.log('📌 已抵達最末週次 (無法再下一週)，掃描完成！');
-      break;
-    }
+  // 依序爬取所有網址
+  for (let u = 0; u < targetUrls.length; u++) {
+    const currentUrl = targetUrls[u];
+    console.log(`\n🌐 [${u + 1}/${targetUrls.length}] 正在處理查詢條件：${currentUrl}`);
 
     try {
-      console.log('👉 點擊前往下一週...');
-      await nextBtn.click({ timeout: 3000 });
-      await page.waitForTimeout(1500);
-    } catch (e) {
-      console.log('⚠️ 下一週點擊未響應，結束翻頁。');
-      break;
+      await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForSelector('#schedule_area', { timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(2000);
+
+      // 1. 往前退到最早的一週
+      console.log('  ⏪ 嘗試回溯上一週...');
+      for (let step = 0; step < 4; step++) {
+        const prevBtn = await page.$('button.slick-prev');
+        if (!prevBtn) break;
+        const isDisabled = await page.evaluate(el => el.classList.contains('slick-disabled') || el.disabled, prevBtn);
+        if (isDisabled) break;
+
+        try {
+          await prevBtn.click({ timeout: 3000 });
+          await page.waitForTimeout(1500);
+        } catch (e) {
+          break;
+        }
+      }
+
+      // 2. 由前往後抓取該網址的所有週次
+      const visitedWeeks = new Set();
+      for (let week = 1; week <= 10; week++) {
+        await page.waitForTimeout(1200);
+        const weekData = await extractCurrentWeek();
+
+        if (weekData.weekRange && !visitedWeeks.has(weekData.weekRange)) {
+          visitedWeeks.add(weekData.weekRange);
+          allCourses.push(...weekData.courses);
+          console.log(`  🔎 週次 [${weekData.weekRange}] 抓取 ${weekData.courses.length} 堂`);
+        }
+
+        const nextBtn = await page.$('button.slick-next');
+        if (!nextBtn) break;
+        const isDisabled = await page.evaluate(el => el.classList.contains('slick-disabled') || el.disabled, nextBtn);
+        if (isDisabled) break;
+
+        try {
+          await nextBtn.click({ timeout: 3000 });
+          await page.waitForTimeout(1500);
+        } catch (e) {
+          break;
+        }
+      }
+    } catch (err) {
+      console.error(`  ⚠️ 網址抓取失敗，跳過：`, err.message);
     }
   }
 
   await browser.close();
 
-  // 去重並按日期與時間排序
+  // ----------------------------------------------------
+  // 聯集去重：以 日期 + 時間 + 分店 + 老師 作為唯一 Key
+  // ----------------------------------------------------
   const uniqueMap = new Map();
-  allCourses.forEach(c => uniqueMap.set(`${c.date}_${c.start}_${c.branch}`, c));
-  const finalCourses = Array.from(uniqueMap.values()).sort((a, b) => (a.date + a.start).localeCompare(b.date + b.start));
+  allCourses.forEach(c => {
+    const key = `${c.date}_${c.start}_${c.branch}_${c.teacher}`;
+    uniqueMap.set(key, c);
+  });
+  
+  const finalCourses = Array.from(uniqueMap.values()).sort((a, b) => 
+    (a.date + a.start).localeCompare(b.date + b.start)
+  );
 
-  console.log(`✅ 全程掃描結束！共獲取 ${finalCourses.length} 堂真實課程（涵蓋歷史與未來週數）！`);
+  console.log(`\n✅ 所有網址聯集完成！共彙整 ${finalCourses.length} 堂課。`);
 
   // 推送至 Google 試算表
   const gasUrl = process.env.GAS_WEBAPP_URL;
