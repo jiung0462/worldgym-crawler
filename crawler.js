@@ -4,13 +4,19 @@ const axios = require('axios');
 (async () => {
   console.log('🚀 啟動無頭瀏覽器...');
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
+  const context = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  });
+  const page = await context.newPage();
 
-  await page.setViewportSize({ width: 1440, height: 900 });
+  // 設定操作超時上限，避免無限等待
+  page.setDefaultTimeout(10000);
 
   // 進入台南 BodyCombat 查詢頁
   const targetUrl = 'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&class_uid=AB0060001#query_result';
-  await page.goto(targetUrl, { waitUntil: 'networkidle' });
+  console.log('🌐 正在開啟查詢頁面...');
+  await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
   // 抽取單週課表的共用函式
   const extractCurrentWeek = async () => {
@@ -18,13 +24,18 @@ const axios = require('axios');
       const cards = Array.from(document.querySelectorAll('#schedule_area .class_list'));
       if (!cards.length) return { courses: [], weekRange: "" };
 
-      const headerMatch = document.body.innerText.match(/(\d{1,2})月\s*(\d{1,2})-(\d{1,2}),?\s*(\d{4})/);
+      // 支援常規格式 (9月 7-13, 2026) 與跨月格式 (9月 28-10月 4, 2026)
+      const text = document.body.innerText;
+      const match = text.match(/(\d{1,2})月\s*(\d{1,2})\s*[-~至]\s*(?:(\d{1,2})月\s*)?(\d{1,2}),?\s*(\d{4})/);
+      
       let baseMonday;
       let weekRange = "";
-      if (headerMatch) {
-        const [_, m, startDay, endDay, y] = headerMatch;
-        weekRange = `${y}-${m}-${startDay}`;
-        baseMonday = new Date(parseInt(y), parseInt(m) - 1, parseInt(startDay));
+      if (match) {
+        const startMonth = parseInt(match[1], 10);
+        const startDay = parseInt(match[2], 10);
+        const year = parseInt(match[5], 10);
+        weekRange = `${year}-${String(startMonth).padStart(2, '0')}-${String(startDay).padStart(2, '0')}`;
+        baseMonday = new Date(year, startMonth - 1, startDay);
       } else {
         return { courses: [], weekRange: "" };
       }
@@ -74,11 +85,11 @@ const axios = require('axios');
   };
 
   // 等待課表區域載入
-  await page.waitForSelector('#schedule_area', { timeout: 10000 }).catch(() => {});
-  await page.waitForTimeout(1500);
+  await page.waitForSelector('#schedule_area', { timeout: 15000 }).catch(() => {});
+  await page.waitForTimeout(2000);
 
   // ----------------------------------------------------
-  // 步驟一：一路往前點「Previous」，退到官網最早保留的週次
+  // 步驟一：回溯至最早的歷史週次
   // ----------------------------------------------------
   console.log('⏪ 正在回溯至最早的上一週/歷史週...');
   for (let step = 0; step < 4; step++) {
@@ -91,13 +102,18 @@ const axios = require('axios');
       break;
     }
 
-    console.log('👈 點擊前往上一週...');
-    await prevBtn.click();
-    await page.waitForTimeout(1500);
+    try {
+      console.log('👈 點擊前往上一週...');
+      await prevBtn.click({ timeout: 3000 });
+      await page.waitForTimeout(1500);
+    } catch (e) {
+      console.log('⚠️ 上一週點擊未響應，停止回溯。');
+      break;
+    }
   }
 
   // ----------------------------------------------------
-  // 步驟二：由最早週開始，一路往後點「Next」抓到最後一週
+  // 步驟二：由最早週一路往後抓取所有開放週次
   // ----------------------------------------------------
   const allCourses = [];
   const visitedWeeks = new Set();
@@ -123,14 +139,19 @@ const axios = require('axios');
       break;
     }
 
-    console.log('👉 點擊前往下一週...');
-    await nextBtn.click();
-    await page.waitForTimeout(1500);
+    try {
+      console.log('👉 點擊前往下一週...');
+      await nextBtn.click({ timeout: 3000 });
+      await page.waitForTimeout(1500);
+    } catch (e) {
+      console.log('⚠️ 下一週點擊未響應，結束翻頁。');
+      break;
+    }
   }
 
   await browser.close();
 
-  // 去重並按日期與時間嚴格排序
+  // 去重並按日期與時間排序
   const uniqueMap = new Map();
   allCourses.forEach(c => uniqueMap.set(`${c.date}_${c.start}_${c.branch}`, c));
   const finalCourses = Array.from(uniqueMap.values()).sort((a, b) => (a.date + a.start).localeCompare(b.date + b.start));
@@ -148,7 +169,7 @@ const axios = require('axios');
   const res = await axios.post(gasUrl, {
     secret: "WG_SECRET_TOKEN_2026",
     courses: finalCourses
-  });
+  }, { timeout: 20000 });
 
   console.log('🎉 試算表同步結果：', res.data);
 })();
