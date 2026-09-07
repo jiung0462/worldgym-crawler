@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 const axios = require('axios');
 
 (async () => {
-  console.log('🚀 啟動無頭瀏覽器 (雙網址聯集 + 星期精準校準)...');
+  console.log('🚀 啟動無頭瀏覽器 (往前回溯 2 週 + 往後 5 週聯集)...');
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     viewport: { width: 1440, height: 900 },
@@ -10,7 +10,7 @@ const axios = require('axios');
   });
   const page = await context.newPage();
 
-  // 阻擋分析工具以加速頁面載入
+  // 阻擋分析腳本加速
   await page.route('**/*', (route) => {
     const url = route.request().url();
     if (url.includes('google-analytics') || url.includes('facebook') || url.includes('gtag')) {
@@ -19,9 +19,6 @@ const axios = require('axios');
     return route.continue();
   });
 
-  // ----------------------------------------------------
-  // 目標網址：台南 BodyCombat + 台南 吳小P 老師全課程
-  // ----------------------------------------------------
   const targetUrls = [
     'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&class_uid=AB0060001#query_result',
     'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&teacher_emp_no=6616#query_result'
@@ -79,7 +76,7 @@ const axios = require('axios');
           }
         });
 
-        // 推算正確日期
+        // 依據推算出的星期精準對齊日期
         const courseDate = new Date(baseMonday);
         courseDate.setDate(courseDate.getDate() + closestDay);
         
@@ -88,7 +85,7 @@ const axios = require('axios');
         const dd = String(courseDate.getDate()).padStart(2, '0');
         const dateStr = `${yyyy}-${mm}-${dd}`;
 
-        // 開始與結束時間
+        // 時間
         const timeEl = card.querySelector('.newclass_time');
         let start = "", end = "";
         if (timeEl) {
@@ -101,7 +98,7 @@ const axios = require('axios');
         const storeEl = card.querySelector('.class_store');
         const branch = storeEl ? storeEl.innerText.replace('台南', '').replace('店', '').trim() : "";
 
-        // 老師 (含代課辨識)
+        // 老師
         const teacherEl = card.querySelector('.teacher');
         let teacher = teacherEl ? teacherEl.innerText.trim() : "";
         if (card.innerText.includes('代課') && !teacher.includes('代課')) {
@@ -128,19 +125,42 @@ const axios = require('axios');
 
   for (let u = 0; u < targetUrls.length; u++) {
     const currentUrl = targetUrls[u];
-    console.log(`\n🌐 [${u + 1}/${targetUrls.length}] 正在爬取條件：${currentUrl}`);
+    console.log(`\n🌐 [${u + 1}/${targetUrls.length}] 正在爬取：${currentUrl}`);
 
     try {
       await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
       await page.waitForSelector('#schedule_area', { timeout: 10000 }).catch(() => {});
       await page.waitForTimeout(2000);
 
+      // ----------------------------------------------------
+      // 關鍵步驟：往前點擊「上一週」2 次（回溯兩個禮拜）
+      // ----------------------------------------------------
+      console.log('  ⏪ 正在往前回溯 2 週課表...');
+      for (let prevStep = 0; prevStep < 2; prevStep++) {
+        const canPrev = await page.evaluate(() => {
+          const btn = document.querySelector('button.slick-prev');
+          if (btn && !btn.classList.contains('slick-disabled') && !btn.disabled) {
+            btn.click();
+            return true;
+          }
+          return false;
+        });
+
+        if (!canPrev) {
+          console.log(`  📌 往前至第 ${prevStep} 週已無法再往前回溯。`);
+          break;
+        }
+        await page.waitForTimeout(1200); // 等待輪播動畫滑動就定位
+      }
+
+      // ----------------------------------------------------
+      // 從兩週前開始，由前往後掃描 8 週（前2週 + 本週 + 未來5週）
+      // ----------------------------------------------------
       const visitedWeeks = new Set();
       let lastWeek = "";
 
-      // 往後爬取 5 週
-      for (let week = 1; week <= 5; week++) {
-        await page.waitForTimeout(1200);
+      for (let week = 1; week <= 8; week++) {
+        await page.waitForTimeout(1000);
         const weekData = await extractCurrentWeek();
 
         if (!weekData.weekRange || weekData.weekRange === lastWeek) {
@@ -155,7 +175,7 @@ const axios = require('axios');
           console.log(`  🔎 週次 [${weekData.weekRange}] 抓取 ${weekData.courses.length} 堂課`);
         }
 
-        // 點擊翻頁至下一週
+        // 翻頁至下一週
         const canNext = await page.evaluate(() => {
           const btn = document.querySelector('button.slick-next');
           if (btn && !btn.classList.contains('slick-disabled') && !btn.disabled) {
@@ -177,9 +197,7 @@ const axios = require('axios');
 
   await browser.close();
 
-  // ----------------------------------------------------
-  // 聯集去重：以 日期 + 時間 + 分店 + 老師 + 課程名稱 做唯一辨識
-  // ----------------------------------------------------
+  // 聯集去重
   const uniqueMap = new Map();
   allCourses.forEach(c => {
     const key = `${c.date}_${c.start}_${c.branch}_${c.teacher}_${c.className}`;
@@ -190,7 +208,7 @@ const axios = require('axios');
     (a.date + a.start).localeCompare(b.date + b.start)
   );
 
-  console.log(`\n✅ 雙條件聯集完成！總計取得 ${finalCourses.length} 堂課。`);
+  console.log(`\n✅ 聯集完成！總計取得 ${finalCourses.length} 堂課。`);
 
   const gasUrl = process.env.GAS_WEBAPP_URL;
   if (!gasUrl) {
