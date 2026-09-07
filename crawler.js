@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 const axios = require('axios');
 
 (async () => {
-  console.log('🚀 啟動無頭瀏覽器 (往前回溯 2 週 + 往後 5 週聯集)...');
+  console.log('🚀 啟動無頭瀏覽器 (嚴格過濾複製節點與隱藏卡片)...');
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     viewport: { width: 1440, height: 900 },
@@ -10,7 +10,6 @@ const axios = require('axios');
   });
   const page = await context.newPage();
 
-  // 阻擋分析腳本加速
   await page.route('**/*', (route) => {
     const url = route.request().url();
     if (url.includes('google-analytics') || url.includes('facebook') || url.includes('gtag')) {
@@ -37,9 +36,9 @@ const axios = require('axios');
       const weekRange = `${year}-${String(startMonth).padStart(2, '0')}-${String(startDay).padStart(2, '0')}`;
       const baseMonday = new Date(year, startMonth - 1, startDay);
 
-      // 2. 獲取星期欄位基準 X 座標
+      // 2. 獲取星期欄位基準 X 座標 (排除 slick-cloned)
       let colCenters = [];
-      const dayContainers = Array.from(document.querySelectorAll('#schedule_area .schedule_list_day, #schedule_area .day_item, #schedule_area .slick-slide:not(.slick-cloned)'));
+      const dayContainers = Array.from(document.querySelectorAll('#schedule_area .schedule_list_day:not(.slick-cloned), #schedule_area .day_item:not(.slick-cloned), #schedule_area .slick-slide:not(.slick-cloned)'));
       
       if (dayContainers.length >= 7) {
         colCenters = dayContainers.slice(0, 7).map(el => {
@@ -48,8 +47,18 @@ const axios = require('axios');
         });
       }
 
-      // 3. 抓取課程卡片
-      const cards = Array.from(document.querySelectorAll('#schedule_area .class_list'));
+      // 3. 嚴格過濾卡片：
+      // - 排除 .slick-cloned 容器內的卡片
+      // - 排除隱藏、無寬高、不可見的卡片
+      const allRawCards = Array.from(document.querySelectorAll('#schedule_area .class_list'));
+      const cards = allRawCards.filter(card => {
+        if (card.closest('.slick-cloned')) return false; // 關鍵：踢除輪播複製節點
+        const style = window.getComputedStyle(card);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        const rect = card.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+
       if (!cards.length) return { courses: [], weekRange };
 
       if (colCenters.length < 7) {
@@ -65,7 +74,6 @@ const axios = require('axios');
         const rect = card.getBoundingClientRect();
         const cardCenterX = rect.left + rect.width / 2;
 
-        // 計算距離哪一個星期欄位中心最近 (0 = 週一, 6 = 週日)
         let closestDay = 0;
         let minDiff = Infinity;
         colCenters.forEach((centerX, dayIndex) => {
@@ -76,7 +84,6 @@ const axios = require('axios');
           }
         });
 
-        // 依據推算出的星期精準對齊日期
         const courseDate = new Date(baseMonday);
         courseDate.setDate(courseDate.getDate() + closestDay);
         
@@ -85,7 +92,6 @@ const axios = require('axios');
         const dd = String(courseDate.getDate()).padStart(2, '0');
         const dateStr = `${yyyy}-${mm}-${dd}`;
 
-        // 時間
         const timeEl = card.querySelector('.newclass_time');
         let start = "", end = "";
         if (timeEl) {
@@ -94,18 +100,15 @@ const axios = require('axios');
           end = parts[1] || "";
         }
 
-        // 分店
         const storeEl = card.querySelector('.class_store');
         const branch = storeEl ? storeEl.innerText.replace('台南', '').replace('店', '').trim() : "";
 
-        // 老師
         const teacherEl = card.querySelector('.teacher');
         let teacher = teacherEl ? teacherEl.innerText.trim() : "";
         if (card.innerText.includes('代課') && !teacher.includes('代課')) {
           teacher += " (代課)";
         }
 
-        // 課程名稱
         let className = "BODYCOMBAT®";
         const lines = card.innerText.split('\n').map(s => s.trim()).filter(Boolean);
         if (lines.length >= 2 && !lines[1].includes('店') && !lines[1].includes(':')) {
@@ -132,10 +135,8 @@ const axios = require('axios');
       await page.waitForSelector('#schedule_area', { timeout: 10000 }).catch(() => {});
       await page.waitForTimeout(2000);
 
-      // ----------------------------------------------------
-      // 關鍵步驟：往前點擊「上一週」2 次（回溯兩個禮拜）
-      // ----------------------------------------------------
-      console.log('  ⏪ 正在往前回溯 2 週課表...');
+      // 往前回溯 2 週
+      console.log('  ⏪ 往前回溯 2 週課表...');
       for (let prevStep = 0; prevStep < 2; prevStep++) {
         const canPrev = await page.evaluate(() => {
           const btn = document.querySelector('button.slick-prev');
@@ -146,16 +147,11 @@ const axios = require('axios');
           return false;
         });
 
-        if (!canPrev) {
-          console.log(`  📌 往前至第 ${prevStep} 週已無法再往前回溯。`);
-          break;
-        }
-        await page.waitForTimeout(1200); // 等待輪播動畫滑動就定位
+        if (!canPrev) break;
+        await page.waitForTimeout(1200);
       }
 
-      // ----------------------------------------------------
-      // 從兩週前開始，由前往後掃描 8 週（前2週 + 本週 + 未來5週）
-      // ----------------------------------------------------
+      // 由前往後抓取 8 週
       const visitedWeeks = new Set();
       let lastWeek = "";
 
@@ -175,7 +171,6 @@ const axios = require('axios');
           console.log(`  🔎 週次 [${weekData.weekRange}] 抓取 ${weekData.courses.length} 堂課`);
         }
 
-        // 翻頁至下一週
         const canNext = await page.evaluate(() => {
           const btn = document.querySelector('button.slick-next');
           if (btn && !btn.classList.contains('slick-disabled') && !btn.disabled) {
@@ -208,7 +203,7 @@ const axios = require('axios');
     (a.date + a.start).localeCompare(b.date + b.start)
   );
 
-  console.log(`\n✅ 聯集完成！總計取得 ${finalCourses.length} 堂課。`);
+  console.log(`\n✅ 聯集完成！過濾幽靈節點後實存 ${finalCourses.length} 堂課。`);
 
   const gasUrl = process.env.GAS_WEBAPP_URL;
   if (!gasUrl) {
