@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 const axios = require('axios');
 
 (async () => {
-  console.log('🚀 啟動無頭瀏覽器 (台南BC全收錄 + 吳小P階梯/活力專屬篩選版)...');
+  console.log('🚀 啟動無頭瀏覽器 (抗延遲穩定版)...');
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     viewport: { width: 1440, height: 900 },
@@ -10,7 +10,6 @@ const axios = require('axios');
   });
   const page = await context.newPage();
 
-  // 阻擋分析腳本以加速載入
   await page.route('**/*', (route) => {
     const url = route.request().url();
     if (url.includes('google-analytics') || url.includes('facebook') || url.includes('gtag')) {
@@ -19,7 +18,6 @@ const axios = require('axios');
     return route.continue();
   });
 
-  // 設定目標任務清單：第一個抓全部，第二個只過濾吳小P
   const scrapeTasks = [
     {
       name: '台南 BodyCombat (全老師)',
@@ -35,7 +33,6 @@ const axios = require('axios');
 
   const extractCurrentWeek = async () => {
     return await page.evaluate(() => {
-      // 1. 抓取當週週一基準日期
       const text = document.body.innerText;
       const match = text.match(/(\d{1,2})月\s*(\d{1,2})\s*[-~至]\s*(?:(\d{1,2})月\s*)?(\d{1,2}),?\s*(\d{4})/);
       if (!match) return { courses: [], weekRange: "" };
@@ -46,7 +43,6 @@ const axios = require('axios');
       const weekRange = `${year}-${String(startMonth).padStart(2, '0')}-${String(startDay).padStart(2, '0')}`;
       const baseMonday = new Date(year, startMonth - 1, startDay);
 
-      // 2. 獲取星期欄位基準 X 座標
       let colCenters = [];
       const dayContainers = Array.from(document.querySelectorAll('#schedule_area .schedule_list_day, #schedule_area .day_item, #schedule_area .slick-slide:not(.slick-cloned)'));
       
@@ -57,7 +53,6 @@ const axios = require('axios');
         });
       }
 
-      // 3. 抓取課程卡片
       const cards = Array.from(document.querySelectorAll('#schedule_area .class_list'));
       if (!cards.length) return { courses: [], weekRange };
 
@@ -92,7 +87,6 @@ const axios = require('axios');
         const dd = String(courseDate.getDate()).padStart(2, '0');
         const dateStr = `${yyyy}-${mm}-${dd}`;
 
-        // 時間
         const timeEl = card.querySelector('.newclass_time');
         let start = "", end = "";
         if (timeEl) {
@@ -101,18 +95,15 @@ const axios = require('axios');
           end = parts[1] || "";
         }
 
-        // 分店
         const storeEl = card.querySelector('.class_store');
         const branch = storeEl ? storeEl.innerText.replace('台南', '').replace('店', '').trim() : "";
 
-        // 老師
         const teacherEl = card.querySelector('.teacher');
         let teacher = teacherEl ? teacherEl.innerText.trim() : "";
         if (card.innerText.includes('代課') && !teacher.includes('代課')) {
           teacher += " (代課)";
         }
 
-        // 課程名稱 (階梯、活力、BodyCombat 自動判別)
         let className = "BODYCOMBAT®";
         const lines = card.innerText.split('\n').map(s => s.trim()).filter(Boolean);
         if (lines.length >= 2 && !lines[1].includes('店') && !lines[1].includes(':')) {
@@ -128,6 +119,30 @@ const axios = require('axios');
     });
   };
 
+  // 翻頁輔助函式：優先使用 Slick 原生 API，並具備動畫等待保護
+  const slideNav = async (direction) => {
+    return await page.evaluate((dir) => {
+      // 1. 嘗試呼叫 Slick API
+      if (window.jQuery && jQuery('#schedule_area .slick-slider').length) {
+        try {
+          const slider = jQuery('#schedule_area .slick-slider');
+          const currentSlide = slider.slick('slickCurrentSlide');
+          slider.slick(dir === 'next' ? 'slickNext' : 'slickPrev');
+          return true;
+        } catch(e) {}
+      }
+
+      // 2. 備案：點擊 DOM 按鈕
+      const selector = dir === 'next' ? 'button.slick-next' : 'button.slick-prev';
+      const btn = document.querySelector(selector);
+      if (btn && !btn.classList.contains('slick-disabled')) {
+        btn.click();
+        return true;
+      }
+      return false;
+    }, direction);
+  };
+
   const allCourses = [];
 
   for (let i = 0; i < scrapeTasks.length; i++) {
@@ -135,72 +150,58 @@ const axios = require('axios');
     console.log(`\n🌐 [${i + 1}/${scrapeTasks.length}] 正在爬取任務：${task.name}`);
 
     try {
-      await page.goto(task.url, { waitUntil: 'domcontentloaded', timeout: 25000 });
-      await page.waitForSelector('#schedule_area', { timeout: 10000 }).catch(() => {});
-      await page.waitForTimeout(2000);
+      await page.goto(task.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForSelector('#schedule_area', { timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(2500);
 
       // 往前回溯 2 週
       console.log('  ⏪ 正在往前回溯 2 週課表...');
       for (let prevStep = 0; prevStep < 2; prevStep++) {
-        const canPrev = await page.evaluate(() => {
-          const btn = document.querySelector('button.slick-prev');
-          if (btn && !btn.classList.contains('slick-disabled') && !btn.disabled) {
-            btn.click();
-            return true;
-          }
-          return false;
-        });
-
-        if (!canPrev) {
-          console.log(`  📌 往前至第 ${prevStep} 週已無法再往前回溯。`);
-          break;
-        }
-        await page.waitForTimeout(1200);
+        const moved = await slideNav('prev');
+        if (!moved) break;
+        await page.waitForTimeout(1800); // 充足等待輪播動畫
       }
 
       const visitedWeeks = new Set();
       let lastWeek = "";
+      let noChangeCount = 0;
 
+      // 掃描最多 8 週
       for (let week = 1; week <= 8; week++) {
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(1200);
         const weekData = await extractCurrentWeek();
 
-        if (!weekData.weekRange || weekData.weekRange === lastWeek) {
-          console.log('  📌 課表無更新或已到底。');
-          break;
-        }
-        lastWeek = weekData.weekRange;
-
-        if (!visitedWeeks.has(weekData.weekRange)) {
+        if (weekData.weekRange && !visitedWeeks.has(weekData.weekRange)) {
           visitedWeeks.add(weekData.weekRange);
-          
+          noChangeCount = 0;
+          lastWeek = weekData.weekRange;
+
           let weekCourses = weekData.courses;
-          // 關鍵過濾：如果是第二個任務，只收錄老師名字包含「吳小P」的課程
           if (task.filterPOnly) {
             weekCourses = weekCourses.filter(c => c.teacher && c.teacher.includes('吳小P'));
           }
 
           allCourses.push(...weekCourses);
-          console.log(`  🔎 週次 [${weekData.weekRange}] 擷取 ${weekCourses.length} 堂符合條件之課程`);
+          console.log(`  🔎 週次 [${weekData.weekRange}] 擷取 ${weekCourses.length} 堂課程`);
+        } else if (weekData.weekRange === lastWeek) {
+          noChangeCount++;
+          // 連續 2 次沒變化才判定真正到底，避免單次動畫卡住就被踢出
+          if (noChangeCount >= 2) {
+            console.log('  📌 課表無更新或已到底。');
+            break;
+          }
         }
 
         // 翻頁至下一週
-        const canNext = await page.evaluate(() => {
-          const btn = document.querySelector('button.slick-next');
-          if (btn && !btn.classList.contains('slick-disabled') && !btn.disabled) {
-            btn.click();
-            return true;
-          }
-          return false;
-        });
-
-        if (!canNext) {
+        const movedNext = await slideNav('next');
+        if (!movedNext) {
           console.log('  📌 已到達官方開放的最末週。');
           break;
         }
+        await page.waitForTimeout(1800); // 確保翻頁動畫徹底完成
       }
     } catch (err) {
-      console.error(`  ⚠️ 爬取異常：`, err.message);
+      console.error(`  ⚠️ 任務 [${task.name}] 爬取異常：`, err.message);
     }
   }
 
@@ -219,9 +220,8 @@ const axios = require('axios');
 
   console.log(`\n✅ 聯集篩選完成！總計取得 ${finalCourses.length} 堂課。`);
 
-  // 熔斷保護：若抓到 0 堂課則不寫入試算表，保護歷史資料
   if (finalCourses.length === 0) {
-    console.error('⚠️ 警告：本次爬取筆數為 0，判定官網異常或掛掉，放棄同步以保護舊資料！');
+    console.error('⚠️ 警告：抓取筆數為 0，放棄同步以保護舊資料！');
     process.exit(1);
   }
 
@@ -235,7 +235,7 @@ const axios = require('axios');
   const res = await axios.post(gasUrl, {
     secret: "WG_SECRET_TOKEN_2026",
     courses: finalCourses
-  }, { timeout: 30000 });
+  }, { timeout: 35000 });
 
   console.log('🎉 試算表同步結果：', res.data);
 })();
