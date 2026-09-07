@@ -11,18 +11,11 @@ const axios = require('axios');
   const page = await context.newPage();
   page.setDefaultTimeout(10000);
 
-  // ----------------------------------------------------
-  // 在這裡放入您想「聯集合併」的多個網址清單
-  // ----------------------------------------------------
+  // 查詢網址清單 (若有多個網址可陸續加入)
   const targetUrls = [
-    // 網址 1：例如台南市 BodyCombat
-    'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&class_uid=AB0060001#query_result',
-    
-    // 網址 2：請替換為您的第二個查詢網址 (例如加入其他課程或縣市)
-    'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&teacher_emp_no=6616#query_result'
+    'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&class_uid=AB0060001#query_result'
   ];
 
-  // 抽取單週課表的共用函式
   const extractCurrentWeek = async () => {
     return await page.evaluate(() => {
       const cards = Array.from(document.querySelectorAll('#schedule_area .class_list'));
@@ -61,6 +54,7 @@ const axios = require('axios');
         const dd = String(courseDate.getDate()).padStart(2, '0');
         const dateStr = `${yyyy}-${mm}-${dd}`;
 
+        // 1. 時間
         const timeEl = card.querySelector('.newclass_time');
         let start = "", end = "";
         if (timeEl) {
@@ -69,17 +63,23 @@ const axios = require('axios');
           end = parts[1] || "";
         }
 
+        // 2. 分店
         const storeEl = card.querySelector('.class_store');
         const branch = storeEl ? storeEl.innerText.replace('台南', '').replace('店', '').trim() : "";
 
-        // 嘗試抓取課程名稱（若卡片上有標示），避免不同課程在同教室同時間被視為重複
-        const titleEl = card.querySelector('.class_title') || card.querySelector('h4') || card.querySelector('.classname');
-        const className = titleEl ? titleEl.innerText.trim() : "";
-
+        // 3. 老師 (含代課標註)
         const teacherEl = card.querySelector('.teacher');
         let teacher = teacherEl ? teacherEl.innerText.trim() : "";
         if (card.innerText.includes('代課') && !teacher.includes('代課')) {
           teacher += " (代課)";
+        }
+
+        // 4. 課程名稱 (從卡片行文字或 class 提取，預設 BODYCOMBAT®)
+        let className = "BODYCOMBAT®";
+        const lines = card.innerText.split('\n').map(s => s.trim()).filter(Boolean);
+        // 通常第一行為時間，第二行為課程名稱 (例如 BODYCOMBAT® 或 BODYPUMP®)
+        if (lines.length >= 2 && !lines[1].includes('店') && !lines[1].includes(':')) {
+          className = lines[1];
         }
 
         if (start && branch) {
@@ -93,18 +93,16 @@ const axios = require('axios');
 
   const allCourses = [];
 
-  // 依序爬取所有網址
   for (let u = 0; u < targetUrls.length; u++) {
     const currentUrl = targetUrls[u];
-    console.log(`\n🌐 [${u + 1}/${targetUrls.length}] 正在處理查詢條件：${currentUrl}`);
+    console.log(`\n🌐 [${u + 1}/${targetUrls.length}] 正在抓取：${currentUrl}`);
 
     try {
       await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForSelector('#schedule_area', { timeout: 15000 }).catch(() => {});
       await page.waitForTimeout(2000);
 
-      // 1. 往前退到最早的一週
-      console.log('  ⏪ 嘗試回溯上一週...');
+      // 回溯上一週
       for (let step = 0; step < 4; step++) {
         const prevBtn = await page.$('button.slick-prev');
         if (!prevBtn) break;
@@ -119,7 +117,7 @@ const axios = require('axios');
         }
       }
 
-      // 2. 由前往後抓取該網址的所有週次
+      // 由前往後抓取
       const visitedWeeks = new Set();
       for (let week = 1; week <= 10; week++) {
         await page.waitForTimeout(1200);
@@ -144,15 +142,13 @@ const axios = require('axios');
         }
       }
     } catch (err) {
-      console.error(`  ⚠️ 網址抓取失敗，跳過：`, err.message);
+      console.error(`  ⚠️ 抓取失敗：`, err.message);
     }
   }
 
   await browser.close();
 
-  // ----------------------------------------------------
-  // 聯集去重：以 日期 + 時間 + 分店 + 老師 作為唯一 Key
-  // ----------------------------------------------------
+  // 聯集去重
   const uniqueMap = new Map();
   allCourses.forEach(c => {
     const key = `${c.date}_${c.start}_${c.branch}_${c.teacher}`;
@@ -163,16 +159,15 @@ const axios = require('axios');
     (a.date + a.start).localeCompare(b.date + b.start)
   );
 
-  console.log(`\n✅ 所有網址聯集完成！共彙整 ${finalCourses.length} 堂課。`);
+  console.log(`\n✅ 抓取完成！共 ${finalCourses.length} 堂課。`);
 
-  // 推送至 Google 試算表
   const gasUrl = process.env.GAS_WEBAPP_URL;
   if (!gasUrl) {
     console.error('❌ 未設定 GAS_WEBAPP_URL！');
     process.exit(1);
   }
 
-  console.log('📤 正在寫入 Google 試算表...');
+  console.log('📤 寫入 Google 試算表...');
   const res = await axios.post(gasUrl, {
     secret: "WG_SECRET_TOKEN_2026",
     courses: finalCourses
