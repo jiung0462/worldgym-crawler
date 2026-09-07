@@ -6,23 +6,18 @@ const axios = require('axios');
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
 
+  await page.setViewportSize({ width: 1440, height: 900 });
+
   // 進入台南 BodyCombat 查詢頁
   const targetUrl = 'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&class_uid=AB0060001#query_result';
   await page.goto(targetUrl, { waitUntil: 'networkidle' });
 
-  const allCourses = [];
-  let previousWeekStr = "";
-
-  // 連續抓取當前週以及往後的開放週數 (最多往後抓 5 週)
-  for (let week = 1; week <= 5; week++) {
-    console.log(`🔎 正在抓取第 ${week} 週資料...`);
-    await page.waitForTimeout(2000);
-
-    const weekData = await page.evaluate(() => {
+  // 抽取單週課表的共用函式
+  const extractCurrentWeek = async () => {
+    return await page.evaluate(() => {
       const cards = Array.from(document.querySelectorAll('#schedule_area .class_list'));
       if (!cards.length) return { courses: [], weekRange: "" };
 
-      // 檢查日期標題 (如: 9月 7-13, 2026)
       const headerMatch = document.body.innerText.match(/(\d{1,2})月\s*(\d{1,2})-(\d{1,2}),?\s*(\d{4})/);
       let baseMonday;
       let weekRange = "";
@@ -76,38 +71,76 @@ const axios = require('axios');
 
       return { courses: list, weekRange };
     });
+  };
 
-    if (weekData.weekRange === previousWeekStr || weekData.courses.length === 0) {
-      console.log('📌 已到達官網最後開放週數，停止翻頁。');
+  // 等待課表區域載入
+  await page.waitForSelector('#schedule_area', { timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(1500);
+
+  // ----------------------------------------------------
+  // 步驟一：一路往前點「Previous」，退到官網最早保留的週次
+  // ----------------------------------------------------
+  console.log('⏪ 正在回溯至最早的上一週/歷史週...');
+  for (let step = 0; step < 4; step++) {
+    const prevBtn = await page.$('button.slick-prev');
+    if (!prevBtn) break;
+
+    const isPrevDisabled = await page.evaluate(el => el.classList.contains('slick-disabled') || el.disabled, prevBtn);
+    if (isPrevDisabled) {
+      console.log('📌 已抵達最早週次 (無法再上一週)。');
       break;
     }
 
-    allCourses.push(...weekData.courses);
-    previousWeekStr = weekData.weekRange;
+    console.log('👈 點擊前往上一週...');
+    await prevBtn.click();
+    await page.waitForTimeout(1500);
+  }
 
-    // 嘗試點擊「下週 (Next)」按鈕
-    const nextBtn = await page.$('.next, a:has-text("Next"), [title*="下週"]');
-    if (nextBtn) {
-      await nextBtn.click();
-      await page.waitForTimeout(1500);
-    } else {
+  // ----------------------------------------------------
+  // 步驟二：由最早週開始，一路往後點「Next」抓到最後一週
+  // ----------------------------------------------------
+  const allCourses = [];
+  const visitedWeeks = new Set();
+
+  for (let week = 1; week <= 10; week++) {
+    await page.waitForTimeout(1200);
+    const weekData = await extractCurrentWeek();
+
+    console.log(`🔎 抓取週次 [${weekData.weekRange}]，課程數 ${weekData.courses.length} 筆`);
+
+    if (weekData.weekRange && !visitedWeeks.has(weekData.weekRange)) {
+      visitedWeeks.add(weekData.weekRange);
+      allCourses.push(...weekData.courses);
+    }
+
+    // 檢查「下一週」按鈕
+    const nextBtn = await page.$('button.slick-next');
+    if (!nextBtn) break;
+
+    const isNextDisabled = await page.evaluate(el => el.classList.contains('slick-disabled') || el.disabled, nextBtn);
+    if (isNextDisabled) {
+      console.log('📌 已抵達最末週次 (無法再下一週)，掃描完成！');
       break;
     }
+
+    console.log('👉 點擊前往下一週...');
+    await nextBtn.click();
+    await page.waitForTimeout(1500);
   }
 
   await browser.close();
 
-  // 移除重複並按時間排序
+  // 去重並按日期與時間嚴格排序
   const uniqueMap = new Map();
   allCourses.forEach(c => uniqueMap.set(`${c.date}_${c.start}_${c.branch}`, c));
   const finalCourses = Array.from(uniqueMap.values()).sort((a, b) => (a.date + a.start).localeCompare(b.date + b.start));
 
-  console.log(`✅ 抓取結束，共獲取 ${finalCourses.length} 堂真實課程！`);
+  console.log(`✅ 全程掃描結束！共獲取 ${finalCourses.length} 堂真實課程（涵蓋歷史與未來週數）！`);
 
-  // 將資料推送到 Google 試算表
+  // 推送至 Google 試算表
   const gasUrl = process.env.GAS_WEBAPP_URL;
   if (!gasUrl) {
-    console.error('❌ 未設定 GAS_WEBAPP_URL 環境變數！');
+    console.error('❌ 未設定 GAS_WEBAPP_URL！');
     process.exit(1);
   }
 
