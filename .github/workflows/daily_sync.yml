@@ -1,0 +1,30 @@
+name: WG Schedule Daily Sync
+
+on:
+  schedule:
+    # UTC 19:00 即為 台灣時間 (UTC+8) 凌晨 03:00
+    - cron: '0 19 * * *'
+  workflow_dispatch: # 支援手動隨時點擊測試
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下載專案代碼
+        uses: actions/checkout@v3
+
+      - name: 設定 Node.js 環境
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: 安裝依賴套件 (Playwright & Axios)
+        run: |
+          npm init -y
+          npm install playwright axios
+          npx playwright install --with-deps chromium
+
+      - name: 執行爬蟲並同步試算表
+        env:
+          GAS_WEBAPP_URL: ${{ secrets.GAS_WEBAPP_URL }}
+        run: node crawler.js
