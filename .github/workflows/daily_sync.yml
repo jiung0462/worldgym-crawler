@@ -3,7 +3,7 @@ name: WG Schedule Daily Sync
 on:
   schedule:
     # UTC 19:00 即為 台灣時間 (UTC+8) 凌晨 03:00
-    - cron: '0 19 * * *'
+    - cron: '10 23 * * *'
   workflow_dispatch: # 支援手動隨時點擊測試
 
 jobs:
