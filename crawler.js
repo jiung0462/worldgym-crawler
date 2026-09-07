@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 const axios = require('axios');
 
 (async () => {
-  console.log('🚀 啟動無頭瀏覽器 (往前回溯 2 週 + 往後 5 週聯集穩定版)...');
+  console.log('🚀 啟動無頭瀏覽器 (台南BC全收錄 + 吳小P階梯/活力專屬篩選版)...');
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     viewport: { width: 1440, height: 900 },
@@ -19,9 +19,18 @@ const axios = require('axios');
     return route.continue();
   });
 
-  const targetUrls = [
-    'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&class_uid=AB0060001#query_result',
-    'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&teacher_emp_no=6616#query_result'
+  // 設定目標任務清單：第一個抓全部，第二個只過濾吳小P
+  const scrapeTasks = [
+    {
+      name: '台南 BodyCombat (全老師)',
+      url: 'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&class_uid=AB0060001#query_result',
+      filterPOnly: false
+    },
+    {
+      name: '台南 階梯/活力有氧 (僅限吳小P)',
+      url: 'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&class_uid=AB0010028,AB0010029#query_result',
+      filterPOnly: true
+    }
   ];
 
   const extractCurrentWeek = async () => {
@@ -65,7 +74,6 @@ const axios = require('axios');
         const rect = card.getBoundingClientRect();
         const cardCenterX = rect.left + rect.width / 2;
 
-        // 計算距離哪一個星期欄位中心最近 (0 = 週一, 6 = 週日)
         let closestDay = 0;
         let minDiff = Infinity;
         colCenters.forEach((centerX, dayIndex) => {
@@ -76,7 +84,6 @@ const axios = require('axios');
           }
         });
 
-        // 依據推算出的星期精準對齊日期
         const courseDate = new Date(baseMonday);
         courseDate.setDate(courseDate.getDate() + closestDay);
         
@@ -105,7 +112,7 @@ const axios = require('axios');
           teacher += " (代課)";
         }
 
-        // 課程名稱
+        // 課程名稱 (階梯、活力、BodyCombat 自動判別)
         let className = "BODYCOMBAT®";
         const lines = card.innerText.split('\n').map(s => s.trim()).filter(Boolean);
         if (lines.length >= 2 && !lines[1].includes('店') && !lines[1].includes(':')) {
@@ -123,12 +130,12 @@ const axios = require('axios');
 
   const allCourses = [];
 
-  for (let u = 0; u < targetUrls.length; u++) {
-    const currentUrl = targetUrls[u];
-    console.log(`\n🌐 [${u + 1}/${targetUrls.length}] 正在爬取：${currentUrl}`);
+  for (let i = 0; i < scrapeTasks.length; i++) {
+    const task = scrapeTasks[i];
+    console.log(`\n🌐 [${i + 1}/${scrapeTasks.length}] 正在爬取任務：${task.name}`);
 
     try {
-      await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+      await page.goto(task.url, { waitUntil: 'domcontentloaded', timeout: 25000 });
       await page.waitForSelector('#schedule_area', { timeout: 10000 }).catch(() => {});
       await page.waitForTimeout(2000);
 
@@ -151,7 +158,6 @@ const axios = require('axios');
         await page.waitForTimeout(1200);
       }
 
-      // 由前往後掃描 8 週（前 2 週 + 當週 + 未來 5 週）
       const visitedWeeks = new Set();
       let lastWeek = "";
 
@@ -167,8 +173,15 @@ const axios = require('axios');
 
         if (!visitedWeeks.has(weekData.weekRange)) {
           visitedWeeks.add(weekData.weekRange);
-          allCourses.push(...weekData.courses);
-          console.log(`  🔎 週次 [${weekData.weekRange}] 抓取 ${weekData.courses.length} 堂課`);
+          
+          let weekCourses = weekData.courses;
+          // 關鍵過濾：如果是第二個任務，只收錄老師名字包含「吳小P」的課程
+          if (task.filterPOnly) {
+            weekCourses = weekCourses.filter(c => c.teacher && c.teacher.includes('吳小P'));
+          }
+
+          allCourses.push(...weekCourses);
+          console.log(`  🔎 週次 [${weekData.weekRange}] 擷取 ${weekCourses.length} 堂符合條件之課程`);
         }
 
         // 翻頁至下一週
@@ -204,7 +217,13 @@ const axios = require('axios');
     (a.date + a.start).localeCompare(b.date + b.start)
   );
 
-  console.log(`\n✅ 聯集完成！總計取得 ${finalCourses.length} 堂課。`);
+  console.log(`\n✅ 聯集篩選完成！總計取得 ${finalCourses.length} 堂課。`);
+
+  // 熔斷保護：若抓到 0 堂課則不寫入試算表，保護歷史資料
+  if (finalCourses.length === 0) {
+    console.error('⚠️ 警告：本次爬取筆數為 0，判定官網異常或掛掉，放棄同步以保護舊資料！');
+    process.exit(1);
+  }
 
   const gasUrl = process.env.GAS_WEBAPP_URL;
   if (!gasUrl) {
