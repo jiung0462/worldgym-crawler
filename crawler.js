@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 const axios = require('axios');
 
 (async () => {
-  console.log('🚀 啟動無頭瀏覽器...');
+  console.log('🚀 啟動無頭瀏覽器 (鎖定最新未來週次)...');
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     viewport: { width: 1440, height: 900 },
@@ -19,15 +19,9 @@ const axios = require('axios');
     return route.continue();
   });
 
-  // -------------------------------------------------------------------------
-  // 關鍵：請將以下網址替換為您想要「聯集」的網址清單！
-  // -------------------------------------------------------------------------
+  // 目標網址清單
   const targetUrls = [
-    // 網址 1: 台南 BodyCombat
-    'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&class_uid=AB0060001#query_result',
-    
-    // 網址 2: 例如台南 BodyPump (請依照您要查詢的課程填入真實網址)
-    'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&teacher_emp_no=6616#query_result'
+    'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&class_uid=AB0060001#query_result'
   ];
 
   const extractCurrentWeek = async () => {
@@ -68,7 +62,6 @@ const axios = require('axios');
         const dd = String(courseDate.getDate()).padStart(2, '0');
         const dateStr = `${yyyy}-${mm}-${dd}`;
 
-        // 時間
         const timeEl = card.querySelector('.newclass_time');
         let start = "", end = "";
         if (timeEl) {
@@ -77,21 +70,17 @@ const axios = require('axios');
           end = parts[1] || "";
         }
 
-        // 分店
         const storeEl = card.querySelector('.class_store');
         const branch = storeEl ? storeEl.innerText.replace('台南', '').replace('店', '').trim() : "";
 
-        // 老師
         const teacherEl = card.querySelector('.teacher');
         let teacher = teacherEl ? teacherEl.innerText.trim() : "";
         if (card.innerText.includes('代課') && !teacher.includes('代課')) {
           teacher += " (代課)";
         }
 
-        // 課程名稱（由官網卡片文字取得）
-        let className = "";
+        let className = "BODYCOMBAT®";
         const lines = card.innerText.split('\n').map(s => s.trim()).filter(Boolean);
-        // 通常第一行為時間，第二行即為課程名稱 (如 BODYCOMBAT®、BODYPUMP®)
         if (lines.length >= 2 && !lines[1].includes('店') && !lines[1].includes(':')) {
           className = lines[1];
         }
@@ -114,38 +103,29 @@ const axios = require('axios');
     try {
       await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
       await page.waitForSelector('#schedule_area', { timeout: 10000 }).catch(() => {});
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(1500);
 
-      // 回溯上一週
-      for (let step = 0; step < 3; step++) {
-        const canPrev = await page.evaluate(() => {
-          const btn = document.querySelector('button.slick-prev');
-          if (btn && !btn.classList.contains('slick-disabled') && !btn.disabled) {
-            btn.click();
-            return true;
-          }
-          return false;
-        });
-        if (!canPrev) break;
-        await page.waitForTimeout(800);
-      }
-
-      // 由前往後翻頁掃描
+      // 直接從當前週次往後抓取 6 週（不再往前退到舊資料）
       const visitedWeeks = new Set();
       let lastWeek = "";
-      for (let week = 1; week <= 8; week++) {
-        await page.waitForTimeout(800);
+
+      for (let week = 1; week <= 6; week++) {
+        await page.waitForTimeout(1000);
         const weekData = await extractCurrentWeek();
 
-        if (!weekData.weekRange || weekData.weekRange === lastWeek) break;
+        if (!weekData.weekRange || weekData.weekRange === lastWeek) {
+          console.log('  📌 課表無更新或已到底。');
+          break;
+        }
         lastWeek = weekData.weekRange;
 
         if (!visitedWeeks.has(weekData.weekRange)) {
           visitedWeeks.add(weekData.weekRange);
           allCourses.push(...weekData.courses);
-          console.log(`  🔎 週次 [${weekData.weekRange}] 抓取 ${weekData.courses.length} 筆課程`);
+          console.log(`  🔎 週次 [${weekData.weekRange}] 抓取 ${weekData.courses.length} 堂課`);
         }
 
+        // 點擊下一週
         const canNext = await page.evaluate(() => {
           const btn = document.querySelector('button.slick-next');
           if (btn && !btn.classList.contains('slick-disabled') && !btn.disabled) {
@@ -154,16 +134,20 @@ const axios = require('axios');
           }
           return false;
         });
-        if (!canNext) break;
+
+        if (!canNext) {
+          console.log('  📌 已到達官方開放的最末週。');
+          break;
+        }
       }
     } catch (err) {
-      console.error(`  ⚠️ 網址抓取失敗：`, err.message);
+      console.error(`  ⚠️ 爬取異常：`, err.message);
     }
   }
 
   await browser.close();
 
-  // 聯集去重：以 日期 + 時間 + 分店 + 老師 + 課程名稱 做唯一辨識
+  // 去重並按時間排序
   const uniqueMap = new Map();
   allCourses.forEach(c => {
     const key = `${c.date}_${c.start}_${c.branch}_${c.teacher}_${c.className}`;
@@ -174,7 +158,7 @@ const axios = require('axios');
     (a.date + a.start).localeCompare(b.date + b.start)
   );
 
-  console.log(`\n✅ 聯集抓取結束！總共取得 ${finalCourses.length} 堂課。`);
+  console.log(`\n✅ 抓取結束！總共取得 ${finalCourses.length} 堂課。`);
 
   const gasUrl = process.env.GAS_WEBAPP_URL;
   if (!gasUrl) {
