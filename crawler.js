@@ -233,7 +233,7 @@ const axios = require('axios');
 
   console.log('📤 寫入 Google 試算表...');
   const res = await axios.post(gasUrl, {
-    secret: "WG_SECRET_TOKEN_2026",
+    secret: "F1A3B15B-E1CD-4A31-BB46-C869635AA1ED",
     courses: finalCourses
   }, { timeout: 35000 });
 
