@@ -21,7 +21,7 @@ const axios = require('axios');
   const scrapeTasks = [
     {
       name: '台南 BodyCombat (全老師)',
-      url: 'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&class_uid=AB0060001#query_result',
+      url: 'https://www.worldgymtaiwan.com/aerobics-schedule-search?city_code=67&branch_no=005,067,077,083,136,137,138,139,140,146&class_uid=AB0060001#query_result',
       filterPOnly: false
     },
     {
