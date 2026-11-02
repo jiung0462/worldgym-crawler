@@ -1,1 +1,1 @@
-WG BoydCombat
+WG BodyCombat
